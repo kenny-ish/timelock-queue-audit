@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import timelock_queue_audit as tool
 
@@ -88,6 +89,55 @@ class TimelockQueueAuditTests(unittest.TestCase):
         self.assertEqual(result["operations"][0]["status"], "waiting")
         self.assertEqual(result["operations"][0]["ready_at"], "2025-02-04 10:33:35 UTC")
         self.assertTrue(any(call[0] == "eth_call" for call in rpc.calls))
+
+    def test_requeued_transaction_is_live_after_cancellation(self):
+        block_number = int(REAL_QUEUE_LOG["blockNumber"], 16)
+        eta = tool._decode_queue(REAL_QUEUE_LOG)["eta"]
+        cancelled_log = dict(
+            REAL_QUEUE_LOG,
+            topics=[tool.CANCEL_TOPIC] + REAL_QUEUE_LOG["topics"][1:],
+            blockNumber=hex(block_number + 1),
+            transactionHash="0x" + "11" * 32,
+            logIndex="0x0",
+        )
+        requeued_log = dict(
+            REAL_QUEUE_LOG,
+            blockNumber=hex(block_number + 2),
+            transactionHash="0x" + "22" * 32,
+            logIndex="0x0",
+        )
+        for timestamp, status in ((eta - 1, "waiting"), (eta, "ready"), (eta + 1, "ready")):
+            for include_completed in (False, True):
+                with self.subTest(timestamp=timestamp, include_completed=include_completed):
+                    rpc = FakeRpc(queued=True)
+                    fake_call = rpc.call
+
+                    def call(method, params):
+                        if method == "eth_getLogs":
+                            return {
+                                tool.QUEUE_TOPIC: [REAL_QUEUE_LOG, requeued_log],
+                                tool.CANCEL_TOPIC: [cancelled_log],
+                                tool.EXECUTE_TOPIC: [],
+                            }[params[0]["topics"][0]]
+                        if method == "eth_getBlockByNumber":
+                            return {"timestamp": hex(timestamp)}
+                        return fake_call(method, params)
+
+                    with patch.object(rpc, "call", side_effect=call):
+                        result = tool.scan_timelock(
+                            rpc,
+                            REAL_QUEUE_LOG["address"],
+                            block_number,
+                            block_number + 3,
+                            include_completed=include_completed,
+                        )
+                    self.assertEqual(len(result["operations"]), 1)
+                    row = result["operations"][0]
+                    self.assertEqual(row["status"], status)
+                    self.assertTrue(row["queued"])
+                    self.assertEqual(row["tx_hash"], REAL_QUEUE_LOG["topics"][1])
+                    self.assertEqual(row["eta"], eta)
+                    self.assertEqual(row["block_number"], block_number + 2)
 
     def test_inactive_event_is_hidden_by_default(self):
         rpc = FakeRpc(queued=False)
