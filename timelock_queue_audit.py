@@ -276,16 +276,14 @@ def scan_timelock(
     rows: List[Dict[str, Any]] = []
     for tx_hash, item in operations.items():
         is_queued = _bool_call(client, timelock, tx_hash)
-        if tx_hash in executed:
+        if is_queued:
+            status = "ready" if item["eta"] <= chain_timestamp else "waiting"
+        elif tx_hash in executed:
             status = "executed"
         elif tx_hash in cancelled:
             status = "cancelled"
-        elif not is_queued:
-            status = "inactive"
-        elif item["eta"] <= chain_timestamp:
-            status = "ready"
         else:
-            status = "waiting"
+            status = "inactive"
         if not include_completed and status not in {"waiting", "ready"}:
             continue
         row = dict(item)
